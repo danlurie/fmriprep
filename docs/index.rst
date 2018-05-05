@@ -5,7 +5,6 @@
 
 .. include:: links.rst
 .. include:: ../README.rst
-.. include:: authors.rst
 
 
 Contents
@@ -18,6 +17,8 @@ Contents
    changes
    usage
    workflows
+   sdc
+   outputs
    contributors
    citing
    api/index.rst

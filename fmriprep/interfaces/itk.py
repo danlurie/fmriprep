@@ -52,17 +52,15 @@ class MCFLIRT2ITK(SimpleInterface):
         if num_threads < 1:
             num_threads = None
 
-        with TemporaryDirectory() as tmp_folder:
+        with TemporaryDirectory(prefix='tmp-', dir=runtime.cwd) as tmp_folder:
             # Inputs are ready to run in parallel
             if num_threads is None or num_threads > 1:
-                from multiprocessing import Pool
-                pool = Pool(processes=num_threads, maxtasksperchild=100)
-                itk_outs = pool.map(_mat2itk, [
-                    (in_mat, self.inputs.in_reference, self.inputs.in_source, i, tmp_folder)
-                    for i, in_mat in enumerate(self.inputs.in_files)]
-                )
-                pool.close()
-                pool.join()
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=num_threads) as pool:
+                    itk_outs = list(pool.map(_mat2itk, [
+                        (in_mat, self.inputs.in_reference, self.inputs.in_source, i, tmp_folder)
+                        for i, in_mat in enumerate(self.inputs.in_files)]
+                    ))
             else:
                 itk_outs = [_mat2itk((
                     in_mat, self.inputs.in_reference, self.inputs.in_source, i, tmp_folder))
@@ -73,7 +71,7 @@ class MCFLIRT2ITK(SimpleInterface):
         tfms = '#Insight Transform File V1.0\n' + ''.join(
             [el[1] for el in sorted(itk_outs)])
 
-        self._results['out_file'] = os.path.abspath('mat2itk.txt')
+        self._results['out_file'] = os.path.join(runtime.cwd, 'mat2itk.txt')
         with open(self._results['out_file'], 'w') as f:
             f.write(tfms)
 
@@ -88,6 +86,8 @@ class MultiApplyTransformsInputSpec(ApplyTransformsInputSpec):
                              desc='number of parallel processes')
     save_cmd = traits.Bool(True, usedefault=True,
                            desc='write a log of command lines that were applied')
+    copy_dtype = traits.Bool(False, usedefault=True,
+                             desc='copy dtype from inputs to outputs')
 
 
 class MultiApplyTransformsOutputSpec(TraitedSpec):
@@ -121,7 +121,7 @@ class MultiApplyTransforms(SimpleInterface):
             ifargs.pop(key, None)
 
         # Get a temp folder ready
-        tmp_folder = TemporaryDirectory()
+        tmp_folder = TemporaryDirectory(prefix='tmp-', dir=runtime.cwd)
 
         xfms_list = _arrange_xfms(transforms, num_files, tmp_folder)
         assert len(xfms_list) == num_files
@@ -132,28 +132,26 @@ class MultiApplyTransforms(SimpleInterface):
 
         if num_threads == 1:
             out_files = [_applytfms((
-                in_file, in_xfm, ifargs, runtime.cwd))
+                in_file, in_xfm, ifargs, i, runtime.cwd))
                 for i, (in_file, in_xfm) in enumerate(zip(in_files, xfms_list))
             ]
         else:
-            from multiprocessing import Pool
-            pool = Pool(processes=num_threads, maxtasksperchild=100)
-            out_files = pool.map(
-                _applytfms, [(in_file, in_xfm, ifargs, i, runtime.cwd)
-                             for i, (in_file, in_xfm) in enumerate(zip(in_files, xfms_list))]
-            )
-            pool.close()
-            pool.join()
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=num_threads) as pool:
+                out_files = list(pool.map(_applytfms, [
+                    (in_file, in_xfm, ifargs, i, runtime.cwd)
+                    for i, (in_file, in_xfm) in enumerate(zip(in_files, xfms_list))]
+                ))
         tmp_folder.cleanup()
 
         # Collect output file names, after sorting by index
         self._results['out_files'] = [el[0] for el in out_files]
 
         if save_cmd:
-            with open('command.txt', 'w') as cmdfile:
+            self._results['log_cmdline'] = os.path.join(runtime.cwd, 'command.txt')
+            with open(self._results['log_cmdline'], 'w') as cmdfile:
                 print('\n-------\n'.join([el[1] for el in out_files]),
                       file=cmdfile)
-            self._results['log_cmdline'] = os.path.abspath('command.txt')
         return runtime
 
 
@@ -234,7 +232,7 @@ def _mat2itk(args):
 
     # Run c3d_affine_tool
     C3dAffineTool(transform_file=in_file, reference_file=in_ref, source_file=in_src,
-                  fsl2ras=True, itk_transform=out_file).run()
+                  fsl2ras=True, itk_transform=out_file, resource_monitor=False).run()
     transform = '#Transform %d\n' % index
     with open(out_file) as itkfh:
         transform += ''.join(itkfh.readlines()[2:])
@@ -248,17 +246,31 @@ def _applytfms(args):
     All inputs are zipped in one tuple to make it digestible by
     multiprocessing's map
     """
+    import nibabel as nb
     from niworkflows.nipype.utils.filemanip import fname_presuffix
     from niworkflows.interfaces.fixes import FixHeaderApplyTransforms as ApplyTransforms
 
     in_file, in_xform, ifargs, index, newpath = args
     out_file = fname_presuffix(in_file, suffix='_xform-%05d' % index,
                                newpath=newpath, use_ext=True)
+
+    copy_dtype = ifargs.pop('copy_dtype', False)
     xfm = ApplyTransforms(
         input_image=in_file, transforms=in_xform, output_image=out_file, **ifargs)
     xfm.terminal_output = 'allatonce'
+    xfm.resource_monitor = False
     runtime = xfm.run().runtime
-    return (out_file, runtime.merged)
+
+    if copy_dtype:
+        nii = nb.load(out_file)
+        in_dtype = nb.load(in_file).get_data_dtype()
+
+        # Overwrite only iff dtypes don't match
+        if in_dtype != nii.get_data_dtype():
+            nii.set_data_dtype(in_dtype)
+            nii.to_filename(out_file)
+
+    return (out_file, runtime.cmdline)
 
 
 def _arrange_xfms(transforms, num_files, tmp_folder):

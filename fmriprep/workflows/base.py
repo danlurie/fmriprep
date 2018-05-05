@@ -31,22 +31,24 @@ from .bold import init_func_preproc_wf
 
 
 def init_fmriprep_wf(subject_list, task_id, run_uuid,
-                     ignore, debug, low_mem, anat_only, longitudinal, omp_nthreads,
-                     skull_strip_ants, skull_strip_template, work_dir, output_dir, bids_dir,
-                     freesurfer, output_spaces, template, medial_surface_nan, hires,
+                     ignore, debug, low_mem, anat_only, longitudinal, t2s_coreg,
+                     omp_nthreads, skull_strip_template, work_dir, output_dir, bids_dir,
+                     freesurfer, output_spaces, template, medial_surface_nan, cifti_output, hires,
                      use_bbr, bold2t1w_dof, fmap_bspline, fmap_demean, use_syn, force_syn,
-                     use_aroma, ignore_aroma_err, output_grid_ref):
+                     use_aroma, ignore_aroma_err, aroma_melodic_dim, template_out_grid):
     """
     This workflow organizes the execution of FMRIPREP, with a sub-workflow for
     each subject.
 
-    If FreeSurfer is to be used, a FreeSurfer derivatives folder is created and
-    populated with any needed template subjects.
+    If FreeSurfer's recon-all is to be run, a FreeSurfer derivatives folder is
+    created and populated with any needed template subjects.
 
     .. workflow::
         :graph2use: orig
         :simple_form: yes
 
+        import os
+        os.environ['FREESURFER_HOME'] = os.getcwd()
         from fmriprep.workflows.base import init_fmriprep_wf
         wf = init_fmriprep_wf(subject_list=['fmripreptest'],
                               task_id='',
@@ -56,8 +58,8 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
                               low_mem=False,
                               anat_only=False,
                               longitudinal=False,
+                              t2s_coreg=False,
                               omp_nthreads=1,
-                              skull_strip_ants=True,
                               skull_strip_template='OASIS',
                               work_dir='.',
                               output_dir='.',
@@ -67,6 +69,7 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
                                             'template', 'fsaverage5'],
                               template='MNI152NLin2009cAsym',
                               medial_surface_nan=False,
+                              cifti_output=False,
                               hires=True,
                               use_bbr=True,
                               bold2t1w_dof=9,
@@ -76,7 +79,8 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
                               force_syn=True,
                               use_aroma=False,
                               ignore_aroma_err=False,
-                              output_grid_ref=None)
+                              aroma_melodic_dim=None,
+                              template_out_grid='native')
 
 
     Parameters
@@ -98,11 +102,10 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
         longitudinal : bool
             Treat multiple sessions as longitudinal (may increase runtime)
             See sub-workflows for specific differences
+        t2s_coreg : bool
+            Use multiple BOLD echos to create T2*-map for T2*-driven coregistration
         omp_nthreads : int
             Maximum number of threads an individual process may use
-        skull_strip_ants : bool
-            Use ANTs BrainExtraction.sh-based skull-stripping workflow
-            If ``False``, uses a faster AFNI-based workflow
         skull_strip_template : str
             Name of ANTs skull-stripping template ('OASIS' or 'NKI')
         work_dir : str
@@ -124,9 +127,11 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
              - fsnative
              - fsaverage (or other pre-existing FreeSurfer templates)
         template : str
-            Name of template targeted by `'template'` output space
+            Name of template targeted by ``template`` output space
         medial_surface_nan : bool
             Replace medial wall values with NaNs on functional GIFTI files
+        cifti_output : bool
+            Generate bold CIFTI file in output spaces
         hires : bool
             Enable sub-millimeter preprocessing in FreeSurfer
         use_bbr : bool or None
@@ -147,8 +152,9 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
             Perform ICA-AROMA on MNI-resampled functional series
         ignore_aroma_err : bool
             Do not fail on ICA-AROMA errors
-        output_grid_ref : str or None
-            Path of custom reference image for normalization
+        template_out_grid : str
+            Keyword ('native', '1mm' or '2mm') or path of custom reference
+            image for normalization
 
     """
     fmriprep_wf = pe.Workflow(name='fmriprep_wf')
@@ -172,8 +178,8 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
                                                    low_mem=low_mem,
                                                    anat_only=anat_only,
                                                    longitudinal=longitudinal,
+                                                   t2s_coreg=t2s_coreg,
                                                    omp_nthreads=omp_nthreads,
-                                                   skull_strip_ants=skull_strip_ants,
                                                    skull_strip_template=skull_strip_template,
                                                    reportlets_dir=reportlets_dir,
                                                    output_dir=output_dir,
@@ -182,6 +188,7 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
                                                    output_spaces=output_spaces,
                                                    template=template,
                                                    medial_surface_nan=medial_surface_nan,
+                                                   cifti_output=cifti_output,
                                                    hires=hires,
                                                    use_bbr=use_bbr,
                                                    bold2t1w_dof=bold2t1w_dof,
@@ -189,8 +196,9 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
                                                    fmap_demean=fmap_demean,
                                                    use_syn=use_syn,
                                                    force_syn=force_syn,
-                                                   output_grid_ref=output_grid_ref,
+                                                   template_out_grid=template_out_grid,
                                                    use_aroma=use_aroma,
+                                                   aroma_melodic_dim=aroma_melodic_dim,
                                                    ignore_aroma_err=ignore_aroma_err)
 
         single_subject_wf.config['execution']['crashdump_dir'] = (
@@ -208,11 +216,12 @@ def init_fmriprep_wf(subject_list, task_id, run_uuid,
 
 
 def init_single_subject_wf(subject_id, task_id, name,
-                           ignore, debug, low_mem, anat_only, longitudinal, omp_nthreads,
-                           skull_strip_ants, skull_strip_template, reportlets_dir, output_dir,
+                           ignore, debug, low_mem, anat_only, longitudinal, t2s_coreg,
+                           omp_nthreads, skull_strip_template, reportlets_dir, output_dir,
                            bids_dir, freesurfer, output_spaces, template, medial_surface_nan,
-                           hires, use_bbr, bold2t1w_dof, fmap_bspline, fmap_demean, use_syn,
-                           force_syn, output_grid_ref, use_aroma, ignore_aroma_err):
+                           cifti_output, hires, use_bbr, bold2t1w_dof, fmap_bspline, fmap_demean,
+                           use_syn, force_syn, template_out_grid,
+                           use_aroma, aroma_melodic_dim, ignore_aroma_err):
     """
     This workflow organizes the preprocessing pipeline for a single subject.
     It collects and reports information about the subject, and prepares
@@ -232,17 +241,18 @@ def init_single_subject_wf(subject_id, task_id, name,
                                     name='single_subject_wf',
                                     task_id='',
                                     longitudinal=False,
+                                    t2s_coreg=False,
                                     omp_nthreads=1,
                                     freesurfer=True,
                                     reportlets_dir='.',
                                     output_dir='.',
                                     bids_dir='.',
-                                    skull_strip_ants=True,
                                     skull_strip_template='OASIS',
                                     template='MNI152NLin2009cAsym',
                                     output_spaces=['T1w', 'fsnative',
                                                   'template', 'fsaverage5'],
                                     medial_surface_nan=False,
+                                    cifti_output=False,
                                     ignore=[],
                                     debug=False,
                                     low_mem=False,
@@ -254,8 +264,9 @@ def init_single_subject_wf(subject_id, task_id, name,
                                     fmap_demean=True,
                                     use_syn=True,
                                     force_syn=True,
-                                    output_grid_ref=None,
+                                    template_out_grid='native',
                                     use_aroma=False,
+                                    aroma_melodic_dim=None,
                                     ignore_aroma_err=False)
 
     Parameters
@@ -277,11 +288,10 @@ def init_single_subject_wf(subject_id, task_id, name,
         longitudinal : bool
             Treat multiple sessions as longitudinal (may increase runtime)
             See sub-workflows for specific differences
+        t2s_coreg : bool
+            Use multiple BOLDS echos to create T2*-map for T2*-driven coregistration
         omp_nthreads : int
             Maximum number of threads an individual process may use
-        skull_strip_ants : bool
-            Use ANTs BrainExtraction.sh-based skull-stripping workflow
-            If ``False``, uses a faster AFNI-based workflow
         skull_strip_template : str
             Name of ANTs skull-stripping template ('OASIS' or 'NKI')
         reportlets_dir : str
@@ -303,9 +313,11 @@ def init_single_subject_wf(subject_id, task_id, name,
              - fsnative
              - fsaverage (or other pre-existing FreeSurfer templates)
         template : str
-            Name of template targeted by `'template'` output space
+            Name of template targeted by ``template`` output space
         medial_surface_nan : bool
             Replace medial wall values with NaNs on functional GIFTI files
+        cifti_output : bool
+            Generate bold CIFTI file in output spaces
         hires : bool
             Enable sub-millimeter preprocessing in FreeSurfer
         use_bbr : bool or None
@@ -322,8 +334,9 @@ def init_single_subject_wf(subject_id, task_id, name,
             If fieldmaps are present and enabled, this is not run, by default.
         force_syn : bool
             **Temporary**: Always run SyN-based SDC
-        output_grid_ref : str or None
-            Path of custom reference image for normalization
+        template_out_grid : str
+            Keyword ('native', '1mm' or '2mm') or path of custom reference
+            image for normalization
         use_aroma : bool
             Perform ICA-AROMA on MNI-resampled functional series
         ignore_aroma_err : bool
@@ -384,7 +397,6 @@ def init_single_subject_wf(subject_id, task_id, name,
 
     # Preprocessing of T1w (includes registration to MNI)
     anat_preproc_wf = init_anat_preproc_wf(name="anat_preproc_wf",
-                                           skull_strip_ants=skull_strip_ants,
                                            skull_strip_template=skull_strip_template,
                                            output_spaces=output_spaces,
                                            template=template,
@@ -394,7 +406,8 @@ def init_single_subject_wf(subject_id, task_id, name,
                                            freesurfer=freesurfer,
                                            hires=hires,
                                            reportlets_dir=reportlets_dir,
-                                           output_dir=output_dir)
+                                           output_dir=output_dir,
+                                           num_t1w=len(subject_data['t1w']))
 
     workflow.connect([
         (inputnode, anat_preproc_wf, [('subjects_dir', 'inputnode.subjects_dir')]),
@@ -406,7 +419,8 @@ def init_single_subject_wf(subject_id, task_id, name,
         (bids_info, summary, [('subject_id', 'subject_id')]),
         (bidssrc, anat_preproc_wf, [('t1w', 'inputnode.t1w'),
                                     ('t2w', 'inputnode.t2w'),
-                                    ('roi', 'inputnode.roi')]),
+                                    ('roi', 'inputnode.roi'),
+                                    ('flair', 'inputnode.flair')]),
         (summary, anat_preproc_wf, [('subject_id', 'inputnode.subject_id')]),
         (bidssrc, ds_summary_report, [(('t1w', fix_multi_T1w_source_name), 'source_file')]),
         (summary, ds_summary_report, [('out_report', 'in_file')]),
@@ -423,11 +437,13 @@ def init_single_subject_wf(subject_id, task_id, name,
                                                ignore=ignore,
                                                freesurfer=freesurfer,
                                                use_bbr=use_bbr,
+                                               t2s_coreg=t2s_coreg,
                                                bold2t1w_dof=bold2t1w_dof,
                                                reportlets_dir=reportlets_dir,
                                                output_spaces=output_spaces,
                                                template=template,
                                                medial_surface_nan=medial_surface_nan,
+                                               cifti_output=cifti_output,
                                                output_dir=output_dir,
                                                omp_nthreads=omp_nthreads,
                                                low_mem=low_mem,
@@ -436,8 +452,9 @@ def init_single_subject_wf(subject_id, task_id, name,
                                                use_syn=use_syn,
                                                force_syn=force_syn,
                                                debug=debug,
-                                               output_grid_ref=output_grid_ref,
+                                               template_out_grid=template_out_grid,
                                                use_aroma=use_aroma,
+                                               aroma_melodic_dim=aroma_melodic_dim,
                                                ignore_aroma_err=ignore_aroma_err)
 
         workflow.connect([
@@ -446,18 +463,18 @@ def init_single_subject_wf(subject_id, task_id, name,
               ('outputnode.t1_brain', 'inputnode.t1_brain'),
               ('outputnode.t1_mask', 'inputnode.t1_mask'),
               ('outputnode.t1_seg', 'inputnode.t1_seg'),
+              ('outputnode.t1_aseg', 'inputnode.t1_aseg'),
+              ('outputnode.t1_aparc', 'inputnode.t1_aparc'),
               ('outputnode.t1_tpms', 'inputnode.t1_tpms'),
               ('outputnode.t1_2_mni_forward_transform', 'inputnode.t1_2_mni_forward_transform'),
-              ('outputnode.t1_2_mni_reverse_transform', 'inputnode.t1_2_mni_reverse_transform')])
+              ('outputnode.t1_2_mni_reverse_transform', 'inputnode.t1_2_mni_reverse_transform'),
+              # Undefined if --no-freesurfer, but this is safe
+              ('outputnode.subjects_dir', 'inputnode.subjects_dir'),
+              ('outputnode.subject_id', 'inputnode.subject_id'),
+              ('outputnode.t1_2_fsnative_forward_transform',
+               'inputnode.t1_2_fsnative_forward_transform'),
+              ('outputnode.t1_2_fsnative_reverse_transform',
+               'inputnode.t1_2_fsnative_reverse_transform')]),
         ])
-
-        if freesurfer:
-            workflow.connect([
-                (anat_preproc_wf, func_preproc_wf,
-                 [('outputnode.subjects_dir', 'inputnode.subjects_dir'),
-                  ('outputnode.subject_id', 'inputnode.subject_id'),
-                  ('outputnode.t1_2_fsnative_reverse_transform',
-                   'inputnode.t1_2_fsnative_reverse_transform')]),
-            ])
 
     return workflow

@@ -55,8 +55,13 @@ class NormalizeSurf(SimpleInterface):
     In principle, this should apply safely to any other surface, although it is
     less relevant to surfaces that don't describe an anatomical structure.
 
-    .. _AlgorithmSurfaceApplyAffine: https://github.com/Washington-University/workbench/blob/1b79e56/src/Algorithms/AlgorithmSurfaceApplyAffine.cxx#L73-L91
-    .. _FreeSurfer2CaretConvertAndRegisterNonlinear: https://github.com/Washington-University/Pipelines/blob/ae69b9a/PostFreeSurfer/scripts/FreeSurfer2CaretConvertAndRegisterNonlinear.sh#L147-154
+    .. _AlgorithmSurfaceApplyAffine: https://github.com/Washington-University/workbench\
+/blob/1b79e56/src/Algorithms/AlgorithmSurfaceApplyAffine.cxx#L73-L91
+
+    .. _FreeSurfer2CaretConvertAndRegisterNonlinear: https://github.com/Washington-University/\
+Pipelines/blob/ae69b9a/PostFreeSurfer/scripts/FreeSurfer2CaretConvertAndRegisterNonlinear.sh\
+#L147-154
+
     """
     input_spec = NormalizeSurfInputSpec
     output_spec = NormalizeSurfOutputSpec
@@ -65,7 +70,11 @@ class NormalizeSurf(SimpleInterface):
         transform_file = self.inputs.transform_file
         if not isdefined(transform_file):
             transform_file = None
-        self._results['out_file'] = normalize_surfs(self.inputs.in_file, transform_file)
+        self._results['out_file'] = normalize_surfs(
+            self.inputs.in_file,
+            transform_file,
+            newpath=runtime.cwd
+        )
         return runtime
 
 
@@ -175,13 +184,13 @@ class GiftiSetAnatomicalStructure(SimpleInterface):
                 raise ValueError(
                     "AnatomicalStructurePrimary cannot be derived from filename")
             img.meta.data.insert(0, nb.gifti.GiftiNVPairs('AnatomicalStructurePrimary', asp))
-            out_file = os.path.abspath(fname)
+            out_file = os.path.join(runtime.cwd, fname)
             img.to_filename(out_file)
         self._results['out_file'] = out_file
         return runtime
 
 
-def normalize_surfs(in_file, transform_file):
+def normalize_surfs(in_file, transform_file, newpath=None):
     """ Re-center GIFTI coordinates to fit align to native T1 space
 
     For midthickness surfaces, add MidThickness metadata
@@ -222,8 +231,12 @@ def normalize_surfs(in_file, transform_file):
             pointset.meta.data.insert(1, secondary)
         if not has_geo:
             pointset.meta.data.insert(2, geom_type)
-    img.to_filename(fname)
-    return os.path.abspath(fname)
+
+    if newpath is not None:
+        newpath = os.getcwd()
+    out_file = os.path.join(newpath, fname)
+    img.to_filename(out_file)
+    return out_file
 
 
 def load_transform(fname):

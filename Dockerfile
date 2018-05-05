@@ -22,7 +22,7 @@ RUN apt-get update && \
     apt-get update
 
 # Installing freesurfer
-RUN curl -sSL https://surfer.nmr.mgh.harvard.edu/pub/dist/freesurfer/6.0.0/freesurfer-Linux-centos6_x86_64-stable-pub-v6.0.0.tar.gz | tar zxv -C /opt \
+RUN curl -sSL https://surfer.nmr.mgh.harvard.edu/pub/dist/freesurfer/6.0.1/freesurfer-Linux-centos6_x86_64-stable-pub-v6.0.1.tar.gz | tar zxv --no-same-owner -C /opt \
     --exclude='freesurfer/trctrain' \
     --exclude='freesurfer/subjects/fsaverage_sym' \
     --exclude='freesurfer/subjects/fsaverage3' \
@@ -53,14 +53,14 @@ ENV SUBJECTS_DIR=$FREESURFER_HOME/subjects \
 ENV PERL5LIB=$MINC_LIB_DIR/perl5/5.8.5 \
     MNI_PERL5LIB=$MINC_LIB_DIR/perl5/5.8.5 \
     PATH=$FREESURFER_HOME/bin:$FSFAST_HOME/bin:$FREESURFER_HOME/tktools:$MINC_BIN_DIR:$PATH
-RUN echo "cHJpbnRmICJrcnp5c3p0b2YuZ29yZ29sZXdza2lAZ21haWwuY29tXG41MTcyXG4gKkN2dW12RVYzelRmZ1xuRlM1Si8yYzFhZ2c0RVxuIiA+IC9vcHQvZnJlZXN1cmZlci9saWNlbnNlLnR4dAo=" | base64 -d | sh
 
 # Installing Neurodebian packages (FSL, AFNI, git)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
                     fsl-core=5.0.9-4~nd16.04+1 \
                     fsl-mni152-templates=5.0.7-2 \
-                    afni=16.2.07~dfsg.1-5~nd16.04+1
+                    afni=16.2.07~dfsg.1-5~nd16.04+1 \
+                    convert3d
 
 ENV FSLDIR=/usr/share/fsl/5.0 \
     FSLOUTPUTTYPE=NIFTI_GZ \
@@ -82,27 +82,14 @@ RUN mkdir -p $ANTSPATH && \
     | tar -xzC $ANTSPATH --strip-components 1
 ENV PATH=$ANTSPATH:$PATH
 
-# Installing and setting up c3d
-RUN mkdir -p /opt/c3d && \
-    curl -sSL "http://downloads.sourceforge.net/project/c3d/c3d/1.0.0/c3d-1.0.0-Linux-x86_64.tar.gz" \
-    | tar -xzC /opt/c3d --strip-components 1
-
-ENV C3DPATH /opt/c3d/
-ENV PATH $C3DPATH/bin:$PATH
-
-# Installing WEBP tools
-RUN curl -sSLO "http://downloads.webmproject.org/releases/webp/libwebp-0.5.2-linux-x86-64.tar.gz" && \
-  tar -xf libwebp-0.5.2-linux-x86-64.tar.gz && cd libwebp-0.5.2-linux-x86-64/bin && \
-  mv cwebp /usr/local/bin/ && rm -rf libwebp-0.5.2-linux-x86-64
-
 # Installing SVGO
-RUN curl -sL https://deb.nodesource.com/setup_7.x | bash -
+RUN curl -sL https://deb.nodesource.com/setup_10.x | bash -
 RUN apt-get install -y nodejs
 RUN npm install -g svgo
 
 # Installing and setting up ICA_AROMA
 RUN mkdir -p /opt/ICA-AROMA && \
-  curl -sSL "https://github.com/rhr-pruim/ICA-AROMA/archive/v0.4.1-beta.tar.gz" \
+  curl -sSL "https://github.com/maartenmennes/ICA-AROMA/archive/v0.4.4-beta.tar.gz" \
   | tar -xzC /opt/ICA-AROMA --strip-components 1 && \
   chmod +x /opt/ICA-AROMA/ICA_AROMA.py
 
@@ -115,7 +102,8 @@ RUN curl -sSLO https://repo.continuum.io/miniconda/Miniconda3-4.3.11-Linux-x86_6
 
 ENV PATH=/usr/local/miniconda/bin:$PATH \
     LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
+    LC_ALL=C.UTF-8 \
+    PYTHONNOUSERSITE=1
 
 # Installing precomputed python packages
 RUN conda install -y mkl=2017.0.1 mkl-service;  sync &&\
@@ -127,12 +115,14 @@ RUN conda install -y mkl=2017.0.1 mkl-service;  sync &&\
                      libxml2=2.9.4 \
                      libxslt=1.1.29\
                      traits=4.6.0; sync &&  \
+    chmod -R a+rX /usr/local/miniconda; sync && \
     chmod +x /usr/local/miniconda/bin/*; sync && \
     conda clean --all -y; sync && \
     conda clean -tipsy && sync
 
-# Precaching fonts
-RUN python -c "from matplotlib import font_manager"
+# Precaching fonts, set 'Agg' as default backend for matplotlib
+RUN python -c "from matplotlib import font_manager" && \
+    sed -i 's/\(backend *: \).*$/\1Agg/g' $( python -c "import matplotlib; print(matplotlib.matplotlib_fname())" )
 
 # Installing Ubuntu packages and cleaning up
 RUN apt-get update && \
@@ -152,7 +142,8 @@ WORKDIR /root/
 ENV CRN_SHARED_DATA /niworkflows_data
 ADD docker/scripts/get_templates.sh get_templates.sh
 RUN mkdir $CRN_SHARED_DATA && \
-    /root/get_templates.sh
+    /root/get_templates.sh && \
+    chmod -R a+rX $CRN_SHARED_DATA
 
 # Installing dev requirements (packages that are not in pypi)
 ADD requirements.txt requirements.txt
@@ -161,7 +152,10 @@ RUN pip install -r requirements.txt && \
 
 # Installing FMRIPREP
 COPY . /root/src/fmriprep
-RUN cd /root/src/fmriprep && \
+ARG VERSION
+# Force static versioning within container
+RUN echo "${VERSION}" > /root/src/fmriprep/fmriprep/VERSION && \
+    cd /root/src/fmriprep && \
     pip install .[all] && \
     rm -rf ~/.cache/pip
 

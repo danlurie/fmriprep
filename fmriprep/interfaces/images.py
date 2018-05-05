@@ -13,14 +13,14 @@ import os
 import numpy as np
 import nibabel as nb
 import nilearn.image as nli
+from textwrap import indent
 
 from niworkflows.nipype import logging
 from niworkflows.nipype.utils.filemanip import fname_presuffix
 from niworkflows.nipype.interfaces.base import (
-    traits, TraitedSpec, BaseInterfaceInputSpec,
+    traits, TraitedSpec, BaseInterfaceInputSpec, SimpleInterface,
     File, InputMultiPath, OutputMultiPath)
 from niworkflows.nipype.interfaces import fsl
-from niworkflows.nipype.interfaces.base import SimpleInterface
 
 LOGGER = logging.getLogger('interface')
 
@@ -54,7 +54,8 @@ class IntraModalMerge(SimpleInterface):
                                                    suffix='_avg', newpath=runtime.cwd)
 
         if self.inputs.to_ras:
-            in_files = [reorient(inf) for inf in in_files]
+            in_files = [reorient(inf, newpath=runtime.cwd)
+                        for inf in in_files]
 
         if len(in_files) == 1:
             filenii = nb.load(in_files[0])
@@ -163,7 +164,7 @@ class TemplateDimensions(SimpleInterface):
         orig_imgs = np.vectorize(nb.load)(in_names)
         reoriented = np.vectorize(nb.as_closest_canonical)(orig_imgs)
         all_zooms = np.array([img.header.get_zooms()[:3] for img in reoriented])
-        all_shapes = np.array([img.shape for img in reoriented])
+        all_shapes = np.array([img.shape[:3] for img in reoriented])
 
         # Identify images that would require excessive up-sampling
         valid = np.ones(all_zooms.shape[0], dtype=bool)
@@ -175,8 +176,8 @@ class TemplateDimensions(SimpleInterface):
             valid[valid] ^= np.any(scales == scales.max(), axis=1)
 
         # Ignore dropped images
-        valid_fnames = in_names[valid]
-        self._results['t1w_valid_list'] = valid_fnames.tolist()
+        valid_fnames = np.atleast_1d(in_names[valid]).tolist()
+        self._results['t1w_valid_list'] = valid_fnames
 
         # Set target shape information
         target_zooms = all_zooms[valid].min(axis=0)
@@ -198,7 +199,7 @@ class TemplateDimensions(SimpleInterface):
 
 
 class ConformInputSpec(BaseInterfaceInputSpec):
-    in_file = File(exists=True, mandatory=True, desc='Input T1w image')
+    in_file = File(exists=True, mandatory=True, desc='Input image')
     target_zooms = traits.Tuple(traits.Float, traits.Float, traits.Float,
                                 desc='Target zoom information')
     target_shape = traits.Tuple(traits.Int, traits.Int, traits.Int,
@@ -206,7 +207,8 @@ class ConformInputSpec(BaseInterfaceInputSpec):
 
 
 class ConformOutputSpec(TraitedSpec):
-    out_file = File(exists=True, desc='Conformed T1w image')
+    out_file = File(exists=True, desc='Conformed image')
+    transform = File(exists=True, desc='Conformation transform')
 
 
 class Conform(SimpleInterface):
@@ -232,7 +234,14 @@ class Conform(SimpleInterface):
         target_span = target_shape * target_zooms
 
         zooms = np.array(reoriented.header.get_zooms()[:3])
-        shape = np.array(reoriented.shape)
+        shape = np.array(reoriented.shape[:3])
+
+        # Reconstruct transform from orig to reoriented image
+        ornt_xfm = nb.orientations.inv_ornt_aff(
+            nb.io_orientation(orig_img.affine), orig_img.shape)
+        # Identity unless proven otherwise
+        target_affine = reoriented.affine.copy()
+        conform_xfm = np.eye(4)
 
         xyz_unit = reoriented.header.get_xyzt_units()[0]
         if xyz_unit == 'unknown':
@@ -240,19 +249,16 @@ class Conform(SimpleInterface):
             xyz_unit = 'mm'
 
         # Set a 0.05mm threshold to performing rescaling
-        atol = {'meter': 5e-5, 'mm': 0.05, 'micron': 50}[xyz_unit]
+        atol = {'meter': 1e-5, 'mm': 0.01, 'micron': 10}[xyz_unit]
 
         # Rescale => change zooms
         # Resize => update image dimensions
         rescale = not np.allclose(zooms, target_zooms, atol=atol)
         resize = not np.all(shape == target_shape)
         if rescale or resize:
-            target_affine = np.eye(4, dtype=reoriented.affine.dtype)
             if rescale:
                 scale_factor = target_zooms / zooms
                 target_affine[:3, :3] = reoriented.affine[:3, :3].dot(np.diag(scale_factor))
-            else:
-                target_affine[:3, :3] = reoriented.affine[:3, :3]
 
             if resize:
                 # The shift is applied after scaling.
@@ -261,10 +267,9 @@ class Conform(SimpleInterface):
                 # Use integer shifts to avoid unnecessary interpolation
                 offset = (reoriented.affine[:3, 3] * size_factor - reoriented.affine[:3, 3])
                 target_affine[:3, 3] = reoriented.affine[:3, 3] + offset.astype(int)
-            else:
-                target_affine[:3, 3] = reoriented.affine[:3, 3]
 
             data = nli.resample_img(reoriented, target_affine, target_shape).get_data()
+            conform_xfm = np.linalg.inv(reoriented.affine).dot(target_affine)
             reoriented = reoriented.__class__(data, target_affine, reoriented.header)
 
         # Image may be reoriented, rescaled, and/or resized
@@ -274,7 +279,14 @@ class Conform(SimpleInterface):
         else:
             out_name = fname
 
+        transform = ornt_xfm.dot(conform_xfm)
+        assert np.allclose(orig_img.affine.dot(transform), target_affine)
+
+        mat_name = fname_presuffix(fname, suffix='.mat', newpath=runtime.cwd, use_ext=False)
+        np.savetxt(mat_name, transform, fmt='%.08f')
+
         self._results['out_file'] = out_name
+        self._results['transform'] = mat_name
 
         return runtime
 
@@ -286,10 +298,14 @@ class ReorientInputSpec(BaseInterfaceInputSpec):
 
 class ReorientOutputSpec(TraitedSpec):
     out_file = File(exists=True, desc='Reoriented T1w image')
+    transform = File(exists=True, desc='Reorientation transform')
 
 
 class Reorient(SimpleInterface):
-    """Reorient a T1w image to RAS (left-right, posterior-anterior, inferior-superior)"""
+    """Reorient a T1w image to RAS (left-right, posterior-anterior, inferior-superior)
+
+    Syncs qform and sform codes for consistent treatment by all software
+    """
     input_spec = ReorientInputSpec
     output_spec = ReorientOutputSpec
 
@@ -299,14 +315,24 @@ class Reorient(SimpleInterface):
         orig_img = nb.load(fname)
         reoriented = nb.as_closest_canonical(orig_img)
 
+        # Reconstruct transform from orig to reoriented image
+        ornt_xfm = nb.orientations.inv_ornt_aff(
+            nb.io_orientation(orig_img.affine), orig_img.shape)
+
+        normalized = normalize_xform(reoriented)
+
         # Image may be reoriented
-        if reoriented is not orig_img:
+        if normalized is not orig_img:
             out_name = fname_presuffix(fname, suffix='_ras', newpath=runtime.cwd)
-            reoriented.to_filename(out_name)
+            normalized.to_filename(out_name)
         else:
             out_name = fname
 
+        mat_name = fname_presuffix(fname, suffix='.mat', newpath=runtime.cwd, use_ext=False)
+        np.savetxt(mat_name, ornt_xfm, fmt='%.08f')
+
         self._results['out_file'] = out_name
+        self._results['transform'] = mat_name
 
         return runtime
 
@@ -321,41 +347,127 @@ class ValidateImageOutputSpec(TraitedSpec):
 
 
 class ValidateImage(SimpleInterface):
+    """
+    Check the correctness of x-form headers (matrix and code)
+
+    This interface implements the `following logic
+    <https://github.com/poldracklab/fmriprep/issues/873#issuecomment-349394544>`_:
+
+    +-------------------+------------------+------------------+------------------\
++------------------------------------------------+
+    | valid quaternions | `qform_code > 0` | `sform_code > 0` | `qform == sform` \
+| actions                                        |
+    +===================+==================+==================+==================\
++================================================+
+    | True              | True             | True             | True             \
+| None                                           |
+    +-------------------+------------------+------------------+------------------\
++------------------------------------------------+
+    | True              | True             | False            | *                \
+| sform, scode <- qform, qcode                   |
+    +-------------------+------------------+------------------+------------------\
++------------------------------------------------+
+    | *                 | *                | True             | False            \
+| qform, qcode <- sform, scode                   |
+    +-------------------+------------------+------------------+------------------\
++------------------------------------------------+
+    | *                 | False            | True             | *                \
+| qform, qcode <- sform, scode                   |
+    +-------------------+------------------+------------------+------------------\
++------------------------------------------------+
+    | *                 | False            | False            | *                \
+| sform, qform <- best affine; scode, qcode <- 1 |
+    +-------------------+------------------+------------------+------------------\
++------------------------------------------------+
+    | False             | *                | False            | *                \
+| sform, qform <- best affine; scode, qcode <- 1 |
+    +-------------------+------------------+------------------+------------------\
++------------------------------------------------+
+    """
     input_spec = ValidateImageInputSpec
     output_spec = ValidateImageOutputSpec
 
     def _run_interface(self, runtime):
         img = nb.load(self.inputs.in_file)
-        out_report = os.path.abspath('report.html')
+        out_report = os.path.join(runtime.cwd, 'report.html')
 
-        qform_code = img.header._structarr['qform_code']
-        sform_code = img.header._structarr['sform_code']
+        # Retrieve xform codes
+        sform_code = int(img.header._structarr['sform_code'])
+        qform_code = int(img.header._structarr['qform_code'])
 
-        # Valid affine information
-        if (qform_code, sform_code) != (0, 0):
+        # Check qform is valid
+        valid_qform = False
+        try:
+            qform = img.get_qform()
+            valid_qform = True
+        except ValueError:
+            pass
+
+        sform = img.get_sform()
+        if np.linalg.det(sform) == 0:
+            valid_sform = False
+        else:
+            RZS = sform[:3, :3]
+            zooms = np.sqrt(np.sum(RZS * RZS, axis=0))
+            valid_sform = np.allclose(zooms, img.header.get_zooms()[:3])
+
+        # Matching affines
+        matching_affines = valid_qform and np.allclose(qform, sform)
+
+        # Both match, qform valid (implicit with match), codes okay -> do nothing, empty report
+        if matching_affines and qform_code > 0 and sform_code > 0:
             self._results['out_file'] = self.inputs.in_file
             open(out_report, 'w').close()
             self._results['out_report'] = out_report
             return runtime
 
+        # A new file will be written
         out_fname = fname_presuffix(self.inputs.in_file, suffix='_valid', newpath=runtime.cwd)
-
-        # Nibabel derives a default LAS affine from the shape and zooms
-        # Use scanner xform code to indicate no alignment has been done
-        img.set_sform(img.affine, nb.nifti1.xform_codes['scanner'])
-
-        img.to_filename(out_fname)
         self._results['out_file'] = out_fname
 
-        snippet = (r'<h3 class="elem-title">WARNING - Invalid header</h3>',
-                   r'<p class="elem-desc">Input file does not have valid qform or sform matrix.',
-                   r'A default, LAS-oriented affine has been constructed.',
-                   r'A left-right flip may have occurred.',
-                   r'Analyses of this dataset MAY BE INVALID.</p>')
-
+        # Row 2:
+        if valid_qform and qform_code > 0 and (sform_code == 0 or not valid_sform):
+            img.set_sform(qform, qform_code)
+            warning_txt = 'Note on orientation: sform matrix set'
+            description = """\
+<p class="elem-desc">The sform has been copied from qform.</p>
+"""
+        # Rows 3-4:
+        # Note: if qform is not valid, matching_affines is False
+        elif (valid_sform and sform_code > 0) and (not matching_affines or qform_code == 0):
+            img.set_qform(img.get_sform(), sform_code)
+            warning_txt = 'Note on orientation: qform matrix overwritten'
+            description = """\
+<p class="elem-desc">The qform has been copied from sform.</p>
+"""
+            if not valid_qform and qform_code > 0:
+                warning_txt = 'WARNING - Invalid qform information'
+                description = """\
+<p class="elem-desc">
+    The qform matrix found in the file header is invalid.
+    The qform has been copied from sform.
+    Checking the original qform information from the data produced
+    by the scanner is advised.
+</p>
+"""
+        # Rows 5-6:
+        else:
+            affine = img.header.get_base_affine()
+            img.set_sform(affine, nb.nifti1.xform_codes['scanner'])
+            img.set_qform(affine, nb.nifti1.xform_codes['scanner'])
+            warning_txt = 'WARNING - Missing orientation information'
+            description = """\
+<p class="elem-desc">
+    FMRIPREP could not retrieve orientation information from the image header.
+    The qform and sform matrices have been set to a default, LAS-oriented affine.
+    Analyses of this dataset MAY BE INVALID.
+</p>
+"""
+        snippet = '<h3 class="elem-title">%s</h3>\n%s\n' % (warning_txt, description)
+        # Store new file and report
+        img.to_filename(out_fname)
         with open(out_report, 'w') as fobj:
-            fobj.write('\n'.join('\t' * 3 + line for line in snippet))
-            fobj.write('\n')
+            fobj.write(indent(snippet, '\t' * 3))
 
         self._results['out_report'] = out_report
         return runtime
@@ -396,62 +508,148 @@ class InvertT1w(SimpleInterface):
         return runtime
 
 
-def reorient(in_file, out_file=None):
+class DemeanImageInputSpec(BaseInterfaceInputSpec):
+    in_file = File(exists=True, mandatory=True,
+                   desc='image to be demeaned')
+    in_mask = File(exists=True, mandatory=True,
+                   desc='mask where median will be calculated')
+    only_mask = traits.Bool(False, usedefault=True,
+                            desc='demean only within mask')
+
+
+class DemeanImageOutputSpec(TraitedSpec):
+    out_file = File(exists=True, desc='demeaned image')
+
+
+class DemeanImage(SimpleInterface):
+    input_spec = DemeanImageInputSpec
+    output_spec = DemeanImageOutputSpec
+
+    def _run_interface(self, runtime):
+        self._results['out_file'] = demean(
+            self.inputs.in_file,
+            self.inputs.in_mask,
+            only_mask=self.inputs.only_mask,
+            newpath=runtime.cwd)
+        return runtime
+
+
+class FilledImageLikeInputSpec(BaseInterfaceInputSpec):
+    in_file = File(exists=True, mandatory=True,
+                   desc='image to be demeaned')
+    fill_value = traits.Float(1.0, usedefault=True,
+                              desc='value to fill')
+    dtype = traits.Enum('float32', 'uint8', usedefault=True,
+                        desc='force output data type')
+
+
+class FilledImageLikeOutputSpec(TraitedSpec):
+    out_file = File(exists=True, desc='demeaned image')
+
+
+class FilledImageLike(SimpleInterface):
+    input_spec = FilledImageLikeInputSpec
+    output_spec = FilledImageLikeOutputSpec
+
+    def _run_interface(self, runtime):
+        self._results['out_file'] = nii_ones_like(
+            self.inputs.in_file,
+            self.inputs.fill_value,
+            self.inputs.dtype,
+            newpath=runtime.cwd)
+        return runtime
+
+
+def reorient(in_file, newpath=None):
     """Reorient Nifti files to RAS"""
-    if out_file is None:
-        out_file = fname_presuffix(in_file, suffix='_ras', newpath=os.getcwd())
+    out_file = fname_presuffix(in_file, suffix='_ras', newpath=newpath)
     nb.as_closest_canonical(nb.load(in_file)).to_filename(out_file)
     return out_file
 
 
-def _flatten_split_merge(in_files):
-    if isinstance(in_files, str):
-        in_files = [in_files]
-
-    nfiles = len(in_files)
-
-    all_nii = []
-    for fname in in_files:
-        nii = nb.squeeze_image(nb.load(fname))
-
-        if nii.get_data().ndim > 3:
-            all_nii += nb.four_to_three(nii)
-        else:
-            all_nii.append(nii)
-
-    if len(all_nii) == 1:
-        LOGGER.warning('File %s cannot be split', all_nii[0])
-        return in_files[0], in_files
-
-    if len(all_nii) == nfiles:
-        flat_split = in_files
-    else:
-        splitname = fname_presuffix(in_files[0], suffix='_split%04d', newpath=os.getcwd())
-        flat_split = []
-        for i, nii in enumerate(all_nii):
-            flat_split.append(splitname % i)
-            nii.to_filename(flat_split[-1])
-
-    # Only one 4D file was supplied
-    if nfiles == 1:
-        merged = in_files[0]
-    else:
-        # More that one in_files - need merge
-        merged = fname_presuffix(in_files[0], suffix='_merged', newpath=os.getcwd())
-        nb.concat_images(all_nii).to_filename(merged)
-
-    return merged, flat_split
-
-
-def extract_wm(in_seg, wm_label=3):
-    import os.path as op
+def extract_wm(in_seg, wm_label=3, newpath=None):
     import nibabel as nb
     import numpy as np
+    from niworkflows.nipype.utils.filemanip import fname_presuffix
 
     nii = nb.load(in_seg)
     data = np.zeros(nii.shape, dtype=np.uint8)
     data[nii.get_data() == wm_label] = 1
-    hdr = nii.header.copy()
-    hdr.set_data_dtype(np.uint8)
-    nb.Nifti1Image(data, nii.affine, hdr).to_filename('wm.nii.gz')
-    return op.abspath('wm.nii.gz')
+
+    out_file = fname_presuffix(in_seg, suffix='_wm', newpath=newpath)
+    new = nb.Nifti1Image(data, nii.affine, nii.header)
+    new.set_data_dtype(np.uint8)
+    new.to_filename(out_file)
+    return out_file
+
+
+def normalize_xform(img):
+    """ Set identical, valid qform and sform matrices in an image
+
+    Selects the best available affine (sform > qform > shape-based), and
+    coerces it to be qform-compatible (no shears).
+
+    The resulting image represents this same affine as both qform and sform,
+    and is marked as NIFTI_XFORM_ALIGNED_ANAT, indicating that it is valid,
+    not aligned to template, and not necessarily preserving the original
+    coordinates.
+
+    If header would be unchanged, returns input image.
+    """
+    # Let nibabel convert from affine to quaternions, and recover xform
+    tmp_header = img.header.copy()
+    tmp_header.set_qform(img.affine)
+    xform = tmp_header.get_qform()
+    xform_code = 2
+
+    # Check desired codes
+    qform, qform_code = img.get_qform(coded=True)
+    sform, sform_code = img.get_sform(coded=True)
+    if all((qform is not None and np.allclose(qform, xform),
+            sform is not None and np.allclose(sform, xform),
+            int(qform_code) == xform_code, int(sform_code) == xform_code)):
+        return img
+
+    new_img = img.__class__(img.get_data(), xform, img.header)
+    # Unconditionally set sform/qform
+    new_img.set_sform(xform, xform_code)
+    new_img.set_qform(xform, xform_code)
+    return new_img
+
+
+def demean(in_file, in_mask, only_mask=False, newpath=None):
+    """Demean ``in_file`` within the mask defined by ``in_mask``"""
+    import os
+    import numpy as np
+    import nibabel as nb
+    from niworkflows.nipype.utils.filemanip import fname_presuffix
+
+    out_file = fname_presuffix(in_file, suffix='_demeaned',
+                               newpath=os.getcwd())
+    nii = nb.load(in_file)
+    msk = nb.load(in_mask).get_data()
+    data = nii.get_data()
+    if only_mask:
+        data[msk > 0] -= np.median(data[msk > 0])
+    else:
+        data -= np.median(data[msk > 0])
+    nb.Nifti1Image(data, nii.affine, nii.header).to_filename(
+        out_file)
+    return out_file
+
+
+def nii_ones_like(in_file, value, dtype, newpath=None):
+    """Create a NIfTI file filled with ``value``, matching properties of ``in_file``"""
+    import os
+    import numpy as np
+    import nibabel as nb
+
+    nii = nb.load(in_file)
+    data = np.ones(nii.shape, dtype=float) * value
+
+    out_file = os.path.join(newpath or os.getcwd(), "filled.nii.gz")
+    nii = nb.Nifti1Image(data, nii.affine, nii.header)
+    nii.set_data_dtype(dtype)
+    nii.to_filename(out_file)
+
+    return out_file

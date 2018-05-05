@@ -11,6 +11,8 @@ Interfaces to generate reportlets
 
 import os
 import time
+import re
+
 from collections import Counter
 from niworkflows.nipype.interfaces.base import (
     traits, TraitedSpec, BaseInterfaceInputSpec,
@@ -59,12 +61,10 @@ class SummaryInterface(SimpleInterface):
 
     def _run_interface(self, runtime):
         segment = self._generate_segment()
-        fname = os.path.abspath('report.html')
+        fname = os.path.join(runtime.cwd, 'report.html')
         with open(fname, 'w') as fobj:
             fobj.write(segment)
-
         self._results['out_report'] = fname
-
         return runtime
 
 
@@ -73,7 +73,9 @@ class SubjectSummaryInputSpec(BaseInterfaceInputSpec):
     t2w = InputMultiPath(File(exists=True), desc='T2w structural images')
     subjects_dir = Directory(desc='FreeSurfer subjects directory')
     subject_id = Str(desc='Subject ID')
-    bold = InputMultiPath(File(exists=True), desc='BOLD functional series')
+    bold = InputMultiPath(traits.Either(File(exists=True),
+                                        traits.List(File(exists=True))),
+                          desc='BOLD functional series')
     output_spaces = traits.List(desc='Target spaces')
     template = traits.Enum('MNI152NLin2009cAsym', desc='Template space')
 
@@ -115,8 +117,11 @@ class SubjectSummary(SummaryInterface):
 
         # Add list of tasks with number of runs
         bold_series = self.inputs.bold if isdefined(self.inputs.bold) else []
+        bold_series = [s[0] if isinstance(s, list) else s for s in bold_series]
+
         counts = Counter(BIDS_NAME.search(series).groupdict()['task_id'][5:]
                          for series in bold_series)
+
         tasks = ''
         if counts:
             header = '\t\t<ul class="elem-desc">'
@@ -138,9 +143,8 @@ class SubjectSummary(SummaryInterface):
 class FunctionalSummaryInputSpec(BaseInterfaceInputSpec):
     slice_timing = traits.Enum(False, True, 'TooShort', usedefault=True,
                                desc='Slice timing correction used')
-    distortion_correction = traits.Enum('epi', 'fieldmap', 'phasediff', 'SyN', 'None',
-                                        desc='Susceptibility distortion correction method',
-                                        mandatory=True)
+    distortion_correction = traits.Str(desc='Susceptibility distortion correction method',
+                                       mandatory=True)
     pe_direction = traits.Enum(None, 'i', 'i-', 'j', 'j-', mandatory=True,
                                desc='Phase-encoding direction detected')
     registration = traits.Enum('FSL', 'FreeSurfer', mandatory=True,
@@ -149,7 +153,7 @@ class FunctionalSummaryInputSpec(BaseInterfaceInputSpec):
     registration_dof = traits.Enum(6, 9, 12, desc='Registration degrees of freedom',
                                    mandatory=True)
     output_spaces = traits.List(desc='Target spaces')
-    confounds = traits.List(desc='Confounds collected')
+    confounds_file = File(exists=True, desc='Confounds file')
 
 
 class FunctionalSummary(SummaryInterface):
@@ -160,11 +164,6 @@ class FunctionalSummary(SummaryInterface):
         stc = {True: 'Applied',
                False: 'Not applied',
                'TooShort': 'Skipped (too few volumes)'}[self.inputs.slice_timing]
-        sdc = {'epi': 'Phase-encoding polarity (pepolar)',
-               'fieldmap': 'Direct fieldmapping',
-               'phasediff': 'Phase difference',
-               'SyN': 'Symmetric normalization (SyN) - no fieldmaps',
-               'None': 'None'}[self.inputs.distortion_correction]
         reg = {'FSL': [
                    'FLIRT with boundary-based registration (BBR) metric - %d dof' % dof,
                    'FLIRT rigid registration - 6 dof'],
@@ -176,9 +175,14 @@ class FunctionalSummary(SummaryInterface):
             pedir = 'MISSING - Assuming Anterior-Posterior'
         else:
             pedir = {'i': 'Left-Right', 'j': 'Anterior-Posterior'}[self.inputs.pe_direction[0]]
-        return FUNCTIONAL_TEMPLATE.format(pedir=pedir, stc=stc, sdc=sdc, registration=reg,
-                                          output_spaces=', '.join(self.inputs.output_spaces),
-                                          confounds=', '.join(self.inputs.confounds))
+
+        if isdefined(self.inputs.confounds_file):
+            with open(self.inputs.confounds_file) as cfh:
+                conflist = cfh.readline().strip('\n').strip()
+        return FUNCTIONAL_TEMPLATE.format(
+            pedir=pedir, stc=stc, sdc=self.inputs.distortion_correction, registration=reg,
+            output_spaces=', '.join(self.inputs.output_spaces),
+            confounds=re.sub(r'[\t ]+', ', ', conflist))
 
 
 class AboutSummaryInputSpec(BaseInterfaceInputSpec):

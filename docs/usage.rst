@@ -3,6 +3,12 @@
 Usage
 -----
 
+.. warning::
+   As of FMRIPREP 1.0.12, the software includes a tracking system
+   to report usage statistics and errors. Users can opt-out using
+   the ``--notrack`` command line argument.
+   
+
 Execution and the BIDS format
 =============================
 
@@ -21,12 +27,23 @@ Example: ::
 
     fmriprep data/bids_root/ out/ participant -w work/
 
+
 Command-Line Arguments
-~~~~~~~~~~~~~~~~~~~~~~
+======================
 
 .. argparse::
    :ref: fmriprep.cli.run.get_parser
    :prog: fmriprep
+   :nodefault:
+   :nodefaultconst:
+
+
+The docker wrapper CLI
+======================
+
+.. argparse::
+   :ref: fmriprep_docker.get_parser
+   :prog: fmriprep-docker
    :nodefault:
    :nodefaultconst:
 
@@ -49,7 +66,7 @@ All bugs, concerns and enhancement requests for this software can be submitted h
 https://github.com/poldracklab/fmriprep/issues.
 
 If you have a problem or would like to ask a question about how to use ``fmriprep``,
-please submit a question to `NeuroStars.org <http://neurostars.org>`_ with an ``fmriprep`` tag.
+please submit a question to `NeuroStars.org <http://neurostars.org/tags/fmriprep>`_ with an ``fmriprep`` tag.
 NeuroStars.org is a platform similar to StackOverflow but dedicated to neuroinformatics.
 
 All previous ``fmriprep`` questions are available here:

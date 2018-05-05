@@ -4,13 +4,15 @@
 Processing pipeline details
 ===========================
 
-``fmriprep`` adapts its pipeline depending on what data and metadata is
-available is used as the input. For example, slice timing correction will be
+``fmriprep`` adapts its pipeline depending on what data and metadata are
+available and are used as the input.
+For example, slice timing correction will be
 performed only if the ``SliceTiming`` metadata field is found for the input
 dataset.
 
-High-level view of the basic pipeline (for single-band datasets, without
-slice-timing information and no fieldmap acquisitions):
+A (very) high-level view of the simplest pipeline (for a single-band dataset with only
+one task, single-run, with no slice-timing information nor fieldmap acquisitions)
+is presented below:
 
 .. workflow::
     :graph2use: orig
@@ -21,17 +23,18 @@ slice-timing information and no fieldmap acquisitions):
                                 name='single_subject_wf',
                                 task_id='',
                                 longitudinal=False,
+                                t2s_coreg=False,
                                 omp_nthreads=1,
                                 freesurfer=True,
                                 reportlets_dir='.',
                                 output_dir='.',
                                 bids_dir='.',
-                                skull_strip_ants=True,
                                 skull_strip_template='OASIS',
                                 template='MNI152NLin2009cAsym',
                                 output_spaces=['T1w', 'fsnative',
                                               'template', 'fsaverage5'],
                                 medial_surface_nan=False,
+                                cifti_output=False,
                                 ignore=[],
                                 debug=False,
                                 low_mem=False,
@@ -43,8 +46,9 @@ slice-timing information and no fieldmap acquisitions):
                                 fmap_demean=True,
                                 use_syn=True,
                                 force_syn=True,
-                                output_grid_ref=None,
+                                template_out_grid='native',
                                 use_aroma=False,
+                                aroma_melodic_dim=None,
                                 ignore_aroma_err=False)
 
 
@@ -63,35 +67,50 @@ T1w/T2w preprocessing
                               template='MNI152NLin2009cAsym',
                               output_spaces=['T1w', 'fsnative',
                                              'template', 'fsaverage5'],
-                              skull_strip_ants=True,
                               skull_strip_template='OASIS',
                               freesurfer=True,
                               longitudinal=False,
                               debug=False,
-                              hires=True)
+                              hires=True,
+                              num_t1w=1)
 
-The anatomical sub-workflow begins by constructing a template image by
-:ref:`conforming <conformation>` any T1-weighted images to RAS orientation and
-a common voxel size, and, in the case of multiple images, merges them into a
-single template (see `Longitudinal processing`_).
-This template is then skull-stripped, and the white matter/gray
-matter/cerebrospinal fluid segments are found.
-Finally, a non-linear registration to the MNI template space is estimated.
+The anatomical sub-workflow begins by constructing an average image by
+:ref:`conforming <conformation>` all found T1w images to RAS orientation and
+a common voxel size, and, in the case of multiple images, averages them into a
+single reference template (see `Longitudinal processing`_).
+
+.. _t1preproc_steps:
+
+Brain extraction, brain tissue segmentation and spatial normalization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Then, the T1w image/average is skull-stripped using ANTs' ``antsBrainExtraction.sh``,
+which is an atlas-based brain extraction workflow.
 
 .. figure:: _static/brainextraction_t1.svg
     :scale: 100%
 
-    Brain extraction (ANTs).
+    Brain extraction
+
+
+Once the brain mask is computed, FSL ``fast`` is utilized for brain tissue segmentation.
 
 .. figure:: _static/segmentation.svg
     :scale: 100%
 
-    Brain tissue segmentation (FAST).
+    Brain tissue segmentation.
+
+
+Finally, spatial normalization to MNI-space is performed using ANTs' ``antsRegistration``
+in a multiscale, mutual-information based, nonlinear registration scheme.
+In particular, spatial normalization is done using the `ICBM 2009c Nonlinear
+Asymmetric template (1×1×1mm) <http://nist.mni.mcgill.ca/?p=904>`_ [Fonov2011]_.
 
 .. figure:: _static/T1MNINormalization.svg
     :scale: 100%
 
-    Animation showing T1w to MNI normalization (ANTs)
+    Animation showing T1w to MNI normalization
+
 
 Longitudinal processing
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -114,6 +133,9 @@ flag, which forces the estimation of an unbiased template.
     Reconstructed surfaces and functional datasets will be registered to the
     ``T1w`` space, and not to the input images.
 
+
+.. _workflows_surface:
+
 Surface preprocessing
 ~~~~~~~~~~~~~~~~~~~~~
 :mod:`fmriprep.workflows.anatomical.init_surface_recon_wf`
@@ -129,15 +151,17 @@ Surface preprocessing
 ``fmriprep`` uses FreeSurfer_ to reconstruct surfaces from T1w/T2w
 structural images.
 If enabled, several steps in the ``fmriprep`` pipeline are added or replaced.
-All surface preprocessing may be disabled with the ``--no-freesurfer`` flag.
+All surface preprocessing may be disabled with the ``--fs-no-reconall`` flag.
 
 If FreeSurfer reconstruction is performed, the reconstructed subject is placed in
-``<output dir>/freesurfer/sub-<subject_label>/`` (see `FreeSurfer Derivatives`_).
+``<output dir>/freesurfer/sub-<subject_label>/`` (see :ref:`fsderivs`).
 
 Surface reconstruction is performed in three phases.
 The first phase initializes the subject with T1w and T2w (if available)
 structural images and performs basic reconstruction (``autorecon1``) with the
 exception of skull-stripping.
+Skull-stripping is skipped since the brain mask :ref:`calculated previously
+<t1preproc_steps>` is injected into the appropriate location for FreeSurfer.
 For example, a subject with only one session with T1w and T2w images
 would be processed by the following command::
 
@@ -178,9 +202,22 @@ converted to GIFTI_ format and adjusted to be compatible with multiple software
 packages, including FreeSurfer and the `Connectome Workbench`_.
 
 
+Refinement of the brain mask
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Typically, the original brain mask calculated with ``antsBrainExtraction.sh``
+will contain some innaccuracies including small amounts of MR signal from
+outside the brain.
+Based on the tissue segmentation of FreeSurfer (located in ``mri/aseg.mgz``)
+and only when the :ref:`Surface Processing <workflows_surface>` step has been
+executed, FMRIPREP replaces the brain mask with a refined one that derives
+from the ``aseg.mgz`` file as described in
+:mod:`fmriprep.interfaces.freesurfer.grow_mask`.
+
+
 BOLD preprocessing
 ------------------
-:mod:`fmriprep.workflows.bold.init_func_preproc_wf`
+:mod:`fmriprep.workflows.bold.base.init_func_preproc_wf`
 
 .. workflow::
     :graph2use: orig
@@ -197,25 +234,38 @@ BOLD preprocessing
                               output_spaces=['T1w', 'fsnative',
                                              'template', 'fsaverage5'],
                               medial_surface_nan=False,
+                              cifti_output=False,
                               debug=False,
                               low_mem=False,
                               use_bbr=True,
+                              t2s_coreg=False,
                               bold2t1w_dof=9,
                               fmap_bspline=True,
                               fmap_demean=True,
                               use_syn=True,
                               force_syn=True,
-                              output_grid_ref=None,
+                              template_out_grid='native',
                               use_aroma=False,
+                              aroma_melodic_dim=None,
                               ignore_aroma_err=False)
 
-Preprocessing of BOLD files is split into multiple sub-workflows decribed below.
+Preprocessing of :abbr:`BOLD (blood-oxygen level-dependent)` files is
+split into multiple sub-workflows described below.
+
+In the case of multi-echo :abbr:`BOLD (blood-oxygen level-dependent)` data,
+each echo is processed independently. The two exceptions to this occur for
+:ref:`head-motion estimation <bold_hmc>` and :ref:`T2* map creation <bold_t2s>`.
+
+For the :ref:`head-motion estimation workflow <bold_hmc>`, only the first echo
+is submitted as this echo is expected to have the highest contrast between gray
+and white matter. For :ref:`T2* map creation <bold_t2s>`, all echos are
+considered jointly to look at voxel-wise T2* decay.
 
 .. _bold_ref:
 
 BOLD reference image estimation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-:mod:`fmriprep.workflows.bold.init_bold_reference_wf`
+:mod:`fmriprep.workflows.bold.util.init_bold_reference_wf`
 
 .. workflow::
     :graph2use: orig
@@ -224,26 +274,57 @@ BOLD reference image estimation
     from fmriprep.workflows.bold import init_bold_reference_wf
     wf = init_bold_reference_wf(omp_nthreads=1)
 
-This workflow estimates a reference image for a BOLD series, which is used to
-:ref:`estimate head motion <bold_hmc>` and :ref:`register BOLD series to T1
-<bold_reg>`,
-and performs skull-stripping and contrast enhancement.
-If T1-saturation effects ("dummy scans" or non-steady state volumes) are
-detected they are used as reference due to their superior tissue contrast.
-Otherwise a median of motion corrected subset of volumes is used.
+This workflow estimates a reference image for a
+:abbr:`BOLD (blood-oxygen level-dependent)` series.
+When T1-saturation effects ("dummy scans" or non-steady state volumes) are
+detected, they are averaged and used as reference due to their
+superior tissue contrast.
+Otherwise, a median of motion corrected subset of volumes is used.
 
-Skullstripping of the reference image is performed using Nilearn.
+The reference image is then used to calculate a brain mask for the
+:abbr:`BOLD (blood-oxygen level-dependent)` signal using the
+:mod:`fmriprep.workflows.bold.util.init_enhance_and_skullstrip_bold_wf`.
+Further, the reference is fed to the :ref:`head-motion estimation
+workflow <bold_hmc>` and the :ref:`registration workflow to map
+BOLD series into the T1w image of the same subject <bold_reg>`.
 
 .. figure:: _static/brainextraction.svg
     :scale: 100%
 
-    Brain extraction (BET).
+    Calculation of a brain mask from the BOLD series.
+
+.. _bold_hmc:
+
+Head-motion estimation
+~~~~~~~~~~~~~~~~~~~~~~
+:mod:`fmriprep.workflows.bold.hmc.init_bold_hmc_wf`
+
+.. workflow::
+    :graph2use: colored
+    :simple_form: yes
+
+    from fmriprep.workflows.bold import init_bold_hmc_wf
+    wf = init_bold_hmc_wf(
+        mem_gb=1,
+        omp_nthreads=1)
+
+Using the previously :ref:`estimated reference scan <bold_ref>`,
+FSL ``mcflirt`` is used to estimate head-motion.
+As a result, one rigid-body transform with respect to
+the reference image is written for each :abbr:`BOLD (blood-oxygen level-dependent)`
+time-step.
+Additionally, a list of 6-parameters (three rotations,
+three translations) per time-step is written and fed to the
+:ref:`confounds workflow <bold_confounds>`.
+For a more accurate estimation of head-motion, we calculate its parameters
+before any time-domain filtering (i.e. :ref:`slice-timing correction <bold_stc>`),
+as recommended in [Power2017]_.
 
 .. _bold_stc:
 
 Slice time correction
 ~~~~~~~~~~~~~~~~~~~~~
-:mod:`fmriprep.workflows.bold.init_bold_stc_wf`
+:mod:`fmriprep.workflows.bold.stc.init_bold_stc_wf`
 
 .. workflow::
     :graph2use: colored
@@ -255,108 +336,159 @@ Slice time correction
                   'SliceTiming': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]},
         )
 
-If the ``SliceTiming`` field is present in the input dataset metadata, this
-workflow will be included to perform slice time correction prior to head motion
-estimation.
-Slice time correction is performed using AFNI 3dTShift.
+If the ``SliceTiming`` field is available within the input dataset metadata,
+this workflow performs slice time correction prior to other signal resampling
+processes.
+Slice time correction is performed using AFNI ``3dTShift``.
 All slices are realigned in time to the middle of each TR.
 
-Slice time correction can be disabled with ``--ignore slicetiming`` command
-line argument.
-If a BOLD series has fewer than 5 usable (steady-state) volumes, slice time
-correction will be disabled.
+Slice time correction can be disabled with the ``--ignore slicetiming``
+command line argument.
+If a :abbr:`BOLD (blood-oxygen level-dependent)` series has fewer than
+5 usable (steady-state) volumes, slice time correction will be disabled
+for that run.
 
-.. _bold_hmc:
+.. _bold_t2s:
 
-Head-motion estimation
-~~~~~~~~~~~~~~~~~~~~~~
-:mod:`fmriprep.workflows.bold.init_bold_hmc_wf`
+T2* Driven Coregistration
+~~~~~~~~~~~~~~~~~~~~~~~~~
+:mod:`fmriprep.workflows.bold.t2s.init_bold_t2s_wf`
 
 .. workflow::
     :graph2use: colored
     :simple_form: yes
 
-    from fmriprep.workflows.bold import init_bold_hmc_wf
-    wf = init_bold_hmc_wf(bold_file_size_gb=3, omp_nthreads=1)
+    from fmriprep.workflows.bold import init_bold_t2s_wf
+    wf = init_bold_t2s_wf(
+        bold_echos=['echo1', 'echo2', 'echo3'],
+        echo_times=[13.6, 29.79, 46.59],
+        mem_gb=3,
+        omp_nthreads=1)
 
-FSL MCFLIRT is used to estimate motion transformations using an automatically
-estimated reference scan (see :ref:`bold_ref`).
+If the ``--t2s-coreg`` command line argument is supplied with multi-echo
+:abbr:`BOLD (blood-oxygen level-dependent)` data, a T2* map is generated.
+This T2* map is then used in place of the :ref:`BOLD reference image <bold_ref>`
+to ref:`register the BOLD series to the T1w image of the same subject <bold_reg>`.
 
 Susceptibility Distortion Correction (SDC)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+:mod:`fmriprep.workflows.fieldmap.base.init_sdc_wf`
 
-.. automodule:: fmriprep.workflows.fieldmap
-    :members:
-    :undoc-members:
-    :show-inheritance:
+.. figure:: _static/unwarping.svg
+    :scale: 100%
 
+    Applying susceptibility-derived distortion correction, based on
+    fieldmap estimation.
+
+One of the major problems that affects :abbr:`EPI (echo planar imaging)` data
+is the spatial distortion caused by the inhomogeneity of the field inside
+the scanner.
+Please refer to :ref:`sdc` for details on the
+available workflows.
+
+
+Pre-processed BOLD in native space
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+:mod:`fmriprep.workflows.bold.resampling.init_bold_preproc_trans_wf`
+
+.. workflow::
+    :graph2use: orig
+    :simple_form: yes
+
+    from fmriprep.workflows.bold import init_bold_preproc_trans_wf
+    wf = init_bold_preproc_trans_wf(mem_gb=3, omp_nthreads=1)
+
+A new *preproc* :abbr:`BOLD (blood-oxygen level-dependent)` series is generated
+from the slice-timing corrected or the original data (if
+:abbr:`STC (slice-timing correction)` was not applied) in the
+original space.
+All volumes in the :abbr:`BOLD (blood-oxygen level-dependent)` series are
+resampled in their native space by concatenating the mappings found in previous
+correction workflows (:abbr:`HMC (head-motion correction)` and
+:abbr:`SDC (susceptibility-derived distortion correction)` if excecuted)
+for a one-shot interpolation process.
+Interpolation uses a Lanczos kernel.
 
 .. _bold_reg:
 
 EPI to T1w registration
 ~~~~~~~~~~~~~~~~~~~~~~~
-:mod:`fmriprep.workflows.bold.init_bold_reg_wf`
+:mod:`fmriprep.workflows.bold.registration.init_bold_reg_wf`
 
 .. workflow::
     :graph2use: orig
     :simple_form: yes
 
     from fmriprep.workflows.bold import init_bold_reg_wf
-    wf = init_bold_reg_wf(freesurfer=True,
-                          bold_file_size_gb=3,
-                          omp_nthreads=1,
-                          use_bbr=True,
-                          bold2t1w_dof=9)
+    wf = init_bold_reg_wf(
+        freesurfer=True,
+        mem_gb=1,
+        omp_nthreads=1,
+        use_bbr=True,
+        bold2t1w_dof=9)
 
-The reference EPI image of each run is aligned by the ``bbregister`` routine to the
-reconstructed subject using the gray/white matter boundary (FreeSurfer's
-``?h.white`` surfaces).
+The reference :abbr:`EPI (echo-planar imaging)` image of each run is aligned
+by the ``bbregister`` routine to the reconstructed subject using the gray/white
+matter boundary (FreeSurfer's ``?h.white`` surfaces).
 
 .. figure:: _static/EPIT1Normalization.svg
     :scale: 100%
 
-    Animation showing EPI to T1w registration (FreeSurfer bbregister)
+    Animation showing :abbr:`EPI (echo-planar imaging)` to T1w registration (FreeSurfer ``bbregister``)
 
-If FreeSurfer processing is disabled, FLIRT is performed with the BBR cost
-function, using the FAST segmentation to establish the gray/white matter
-boundary.
+If FreeSurfer processing is disabled, FSL ``flirt`` is run with the
+:abbr:`BBR (boundary-based registration)` cost function, using the
+``fast`` segmentation to establish the gray/white matter boundary. After :abbr:`BBR (boundary-based registration)` is run, the resulting affine transform will be compared to the initial transform found by FLIRT. Excessive deviation will result in rejecting the BBR refinement and accepting the original, affine registration.
 
 EPI to MNI transformation
 ~~~~~~~~~~~~~~~~~~~~~~~~~
-:mod:`fmriprep.workflows.bold.init_bold_mni_trans_wf`
+:mod:`fmriprep.workflows.bold.resampling.init_bold_mni_trans_wf`
 
 .. workflow::
     :graph2use: colored
     :simple_form: yes
 
     from fmriprep.workflows.bold import init_bold_mni_trans_wf
-    wf = init_bold_mni_trans_wf(template='MNI152NLin2009cAsym',
-                                bold_file_size_gb=3,
-                                omp_nthreads=1,
-                                output_grid_ref=None)
+    wf = init_bold_mni_trans_wf(
+        template='MNI152NLin2009cAsym',
+        mem_gb=1,
+        omp_nthreads=1,
+        template_out_grid='native')
 
 This sub-workflow concatenates the transforms calculated upstream (see
-`Head-motion estimation`_, `Susceptibility Distortion Correction (SDC)`_ (if
-fieldmaps are available), `EPI to T1w registration`_, and a T1w-to-MNI
-transform from `T1w/T2w preprocessing`_) to map the EPI image to standardized
-MNI space.
+`Head-motion estimation`_, `Susceptibility Distortion Correction (SDC)`_ --if
+fieldmaps are available--, `EPI to T1w registration`_, and a T1w-to-MNI
+transform from `T1w/T2w preprocessing`_) to map the :abbr:`EPI (echo-planar imaging)`
+image to standard MNI space.
 It also maps the T1w-based mask to MNI space.
 
 Transforms are concatenated and applied all at once, with one interpolation (Lanczos)
 step, so as little information is lost as possible.
 
+The output space grid can be specified using the ``template_out_grid`` argument.
+This option accepts the following (``str``) values:
+
+  * ``'native'``: the original resolution of the BOLD image will be used.
+  * ``'1mm'``: uses the 1:math:`\times`1:math:`\times`1 [mm] version of the template.
+  * ``'2mm'``: uses the 2:math:`\times`2:math:`\times`2 [mm] version of the template.
+  * **Path to arbitrary reference file**: the output will be resampled on a grid with
+    same resolution as this reference.
+
+
 EPI sampled to FreeSurfer surfaces
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-:mod:`fmriprep.workflows.bold.init_bold_surf_wf`
+:mod:`fmriprep.workflows.bold.resampling.init_bold_surf_wf`
 
 .. workflow::
     :graph2use: colored
     :simple_form: yes
 
     from fmriprep.workflows.bold import init_bold_surf_wf
-    wf = init_bold_surf_wf(output_spaces=['T1w', 'fsnative',
-                                         'template', 'fsaverage5'],
-                           medial_surface_nan=False)
+    wf = init_bold_surf_wf(
+        mem_gb=1,
+        output_spaces=['T1w', 'fsnative',
+                       'template', 'fsaverage5'],
+        medial_surface_nan=False)
 
 If FreeSurfer processing is enabled, the motion-corrected functional series
 (after single shot resampling to T1w space) is sampled to the
@@ -368,29 +500,37 @@ Surfaces are generated for the "subject native" surface, as well as transformed 
 ``fsaverage`` template space.
 All surface outputs are in GIFTI format.
 
+.. _bold_confounds:
+
 Confounds estimation
 ~~~~~~~~~~~~~~~~~~~~
-:mod:`fmriprep.workflows.confounds.init_bold_confs_wf`
+:mod:`fmriprep.workflows.bold.confounds.init_bold_confs_wf`
 
 .. workflow::
     :graph2use: colored
     :simple_form: yes
 
-    from fmriprep.workflows.confounds import init_bold_confs_wf
+    from fmriprep.workflows.bold.confounds import init_bold_confs_wf
     wf = init_bold_confs_wf(
         name="discover_wf",
-        use_aroma=False, ignore_aroma_err=False, bold_file_size_gb=3,
+        mem_gb=1,
         metadata={"RepetitionTime": 2.0,
                   "SliceTiming": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]})
 
-Given a motion-corrected fMRI, a brain mask, MCFLIRT movement parameters and a
+Given a motion-corrected fMRI, a brain mask, ``mcflirt`` movement parameters and a
 segmentation, the `discover_wf` sub-workflow calculates potential
 confounds per volume.
 
 Calculated confounds include the mean global signal, mean tissue class signal,
-tCompCor, aCompCor, Framewise Displacement, 6 motion parameters, DVARS, and, if
+tCompCor, aCompCor, Frame-wise Displacement, 6 motion parameters, DVARS, and, if
 the ``--use-aroma`` flag is enabled, the noise components identified by ICA-AROMA
 (those to be removed by the "aggressive" denoising strategy).
+The number of ICA-AROMA components depends on a dimensionality estimate
+made by MELODIC.
+For datasets with a very short TR and a large number of timepoints, this may
+result in an unusually high number of components.
+In such cases, it may be useful to specify the number of components to be
+extracted with ``--aroma-melodic-dimensionality``.
 
 *Note*: *non*-aggressive AROMA denoising is a fundamentally different procedure
 from its "aggressive" counterpart and cannot be performed only by using a set of noise
@@ -408,85 +548,13 @@ be generated, so non-aggressive denoising can be manually performed in the T1w s
         -d sub-<subject_label>_task-<task_id>_bold_MELODICmix.tsv \
         -o sub-<subject_label>_task-<task_id>_bold_space-<space>_AromaNonAggressiveDenoised.nii.gz
 
-A visualisation of the AROMA component classification is also included in the HTML reports.
+A visualization of the AROMA component classification is also included in the HTML reports.
 
 .. figure:: _static/aroma.svg
     :scale: 100%
 
     Maps created with maximum intensity projection (glass brain) with a black
-    brain outline. Right hand side of each map: time series (top in seconds),
-    frequency spectrum (bottom in Hertz). Components classified as signal in
-    green; noise in red.
-
-Reports
--------
-
-FMRIPREP outputs summary reports, outputted to ``<output dir>/fmriprep/sub-<subject_label>.html``.
-These reports provide a quick way to make visual inspection of the results easy.
-Each report is self contained and thus can be easily shared with collaborators (for example via email).
-`View a sample report. <_static/sample_report.html>`_
-
-Derivatives
------------
-
-There are additional files, called "Derivatives", outputted to ``<output dir>/fmriprep/sub-<subject_label>/``.
-See the `BIDS Derivatives`_ spec for more information.
-
-Derivatives related to T1w files are in the ``anat`` subfolder:
-
-- ``*T1w_brainmask.nii.gz`` Brain mask derived using ANTS or AFNI, depending on the command flag ``--skull-strip-ants``
-- ``*T1w_space-MNI152NLin2009cAsym_brainmask.nii.gz`` Same as above, but in MNI space.
-- ``*T1w_dtissue.nii.gz`` Tissue class map derived using FAST.
-- ``*T1w_preproc.nii.gz`` Bias field corrected T1w file, using ANTS' N4BiasFieldCorrection
-- ``*T1w_smoothwm.[LR].surf.gii`` Smoothed GrayWhite surfaces
-- ``*T1w_pial.[LR].surf.gii`` Pial surfaces
-- ``*T1w_midthickness.[LR].surf.gii`` MidThickness surfaces
-- ``*T1w_inflated.[LR].surf.gii`` FreeSurfer inflated surfaces for visualization
-- ``*T1w_space-MNI152NLin2009cAsym_preproc.nii.gz`` Same as above, but in MNI space
-- ``*T1w_space-MNI152NLin2009cAsym_class-CSF_probtissue.nii.gz``
-- ``*T1w_space-MNI152NLin2009cAsym_class-GM_probtissue.nii.gz``
-- ``*T1w_space-MNI152NLin2009cAsym_class-WM_probtissue.nii.gz`` Probability tissue maps, transformed into MNI space
-- ``*T1w_target-MNI152NLin2009cAsym_warp.h5`` Composite (warp and affine) transform to transform T1w into MNI space
-- ``*T1w_target-fsnative_affine.txt`` Affine transform to transform T1w into ``fsnative`` space
-
-Derivatives related to EPI files are in the ``func`` subfolder.
-
-- ``*bold_confounds.tsv`` A tab-separated value file with one column per calculated confound and one row per timepoint/volume
-- ``*bold_AROMAnoiseICs.csv`` A comma-separated value file listing each MELODIC component classified as noise
-- ``*bold_MELODICmix.tsv`` A tab-separated value file with one column per MELODIC component
-
-Volumetric output spaces include ``T1w`` and ``MNI152NLin2009cAsym`` (default).
-
-- ``*bold_space-<space>_brainmask.nii.gz`` Brain mask for EPI files, calculated by nilearn on the average EPI volume, post-motion correction
-- ``*bold_space-<space>_preproc.nii.gz`` Motion-corrected (using MCFLIRT for estimation and ANTs for interpolation) EPI file
-- ``*bold_space-<space>_variant-smoothAROMAnonaggr_preproc.nii.gz`` Motion-corrected (using MCFLIRT for estimation and ANTs for interpolation),
-  smoothed (6mm), and non-aggressively denoised (using AROMA) EPI file - currently produced only for the ``MNI152NLin2009cAsym`` space
-
-Surface output spaces include ``fsnative`` (full density subject-specific mesh),
-``fsaverage`` and the down-sampled meshes ``fsaverage6`` (41k vertices) and
-``fsaverage5`` (10k vertices, default).
-
-- ``*bold_space-<space>.[LR].func.gii`` Motion-corrected EPI file sampled to surface ``<space>``
-
-
-FreeSurfer Derivatives
-----------------------
-
-A FreeSurfer subjects directory is created in ``<output dir>/freesurfer``.
-
-::
-
-    freesurfer/
-        fsaverage{,5,6}/
-            mri/
-            surf/
-            ...
-        sub-<subject_label>/
-            mri/
-            surf/
-            ...
-        ...
-
-Copies of the ``fsaverage`` subjects distributed with the running version of
-FreeSurfer are copied into this subjects directory, if any functional data are
-sampled to those subject spaces.
+    brain outline.
+    Right hand side of each map: time series (top in seconds),
+    frequency spectrum (bottom in Hertz).
+    Components classified as signal in green; noise in red.

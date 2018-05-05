@@ -8,6 +8,10 @@ This pipeline is developed by the `Poldrack lab at Stanford University
 Neuroscience (CRN) <http://reproducibility.stanford.edu/>`_, as well as for
 open-source software distribution.
 
+.. image:: http://bids.neuroimaging.io/openneuro_badge.svg
+  :target: https://openneuro.org
+  :alt: Available in OpenNeuro!
+
 .. image:: https://circleci.com/gh/poldracklab/fmriprep/tree/master.svg?style=shield
   :target: https://circleci.com/gh/poldracklab/fmriprep/tree/master
 
@@ -22,6 +26,9 @@ open-source software distribution.
 
 About
 -----
+
+.. image:: https://github.com/oesteban/fmriprep/raw/38a63e9504ab67812b63813c5fe9af882109408e/docs/_static/fmriprep-workflow-all.png
+
 
 ``fmriprep`` is a functional magnetic resonance imaging (fMRI) data
 preprocessing pipeline that is designed to provide an easily accessible,

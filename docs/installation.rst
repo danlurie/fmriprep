@@ -62,6 +62,7 @@ For example: ::
 See `External Dependencies`_ for more information (e.g., specific versions) on
 what is included in the latest Docker images.
 
+
 Singularity Container
 =====================
 
@@ -74,6 +75,17 @@ Use `docker2singularity <https://github.com/singularityware/docker2singularity>`
         -v D:\host\path\where\to\output\singularity\image:/output \
         singularityware/docker2singularity \
         poldracklab/fmriprep:latest
+
+
+Beware of the back slashes, expected for Windows systems.
+For \*nix users the command translates as follows: ::
+
+    $ docker run --privileged -t --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v /absolute/path/to/output/folder:/output \
+        singularityware/docker2singularity \
+        poldracklab/fmriprep:latest
+
 
 Transfer the resulting Singularity image to the HPC, for example, using ``scp``. ::
 
@@ -92,7 +104,7 @@ For example: ::
         /work/04168/asdf/lonestar/ $WORK/lonestar/output \
         participant \
         --participant-label 387 --nthreads 16 -w $WORK/lonestar/work \
-        --ants-nthreads 16
+        --omp-nthreads 16
 
 .. note::
 
@@ -104,7 +116,7 @@ For example: ::
         /work/04168/asdf/lonestar/ $WORK/lonestar/output \
         participant \
         --participant-label 387 --nthreads 16 -w $WORK/lonestar/work \
-        --ants-nthreads 16
+        --omp-nthreads 16
 
 Manually Prepared Environment
 =============================
@@ -116,6 +128,7 @@ Manually Prepared Environment
 Make sure all of fmriprep's `External Dependencies`_ are installed.
 These tools must be installed and their binaries available in the
 system's ``$PATH``.
+In particular, FreeSurfer requires a license file (see :ref:`fs_license`).
 
 If you have pip installed, install fmriprep ::
 
@@ -124,6 +137,58 @@ If you have pip installed, install fmriprep ::
 If you have your data on hand, you are ready to run fmriprep: ::
 
     $ fmriprep data/dir output/dir participant --participant-label label
+
+
+.. _fs_license:
+
+The FreeSurfer license
+======================
+
+FMRIPREP uses FreeSurfer tools, which require a license to run.
+
+To obtain a FreeSurfer license, simply register for free at
+https://surfer.nmr.mgh.harvard.edu/registration.html.
+
+When using manually-prepared environments, FreeSurfer will search for a license key
+file first using the ``$FS_LICENSE`` environment variable and then in the default
+path to the license key file (``$FREESURFER_HOME/license.txt``).
+
+It is possible to run the docker container pointing the image to a local path
+where a valid license file is stored.
+For example, if the license is stored in the ``$HOME/.licenses/freesurfer/license.txt``
+file on the host system: ::
+
+    $ docker run -ti --rm \
+        -v $HOME/fullds005:/data:ro \
+        -v $HOME/dockerout:/out \
+        -v $HOME/.licenses/freesurfer/license.txt:/opt/freesurfer/license.txt \
+        poldracklab/fmriprep:latest \
+        /data /out/out \
+        participant \
+        --ignore fieldmaps
+
+Using FreeSurfer can also be enabled when using ``fmriprep-docker``: ::
+
+    $ fmriprep-docker --fs-license-file $HOME/.licenses/freesurfer/license.txt \
+        /path/to/data/dir /path/to/output/dir participant
+    RUNNING: docker run --rm -it -v /path/to/data/dir:/data:ro \
+        -v /home/user/.licenses/freesurfer/license.txt:/opt/freesurfer/license.txt \
+        -v /path/to_output/dir:/out poldracklab/fmriprep:1.0.0 \
+        /data /out participant
+    ...
+
+If the environment variable ``$FS_LICENSE`` is set in the host system, then
+it will automatically used by ``fmriprep-docker``. For instance, the following
+would be equivalent to the latest example: ::
+
+    $ export FS_LICENSE=$HOME/.licenses/freesurfer/license.txt
+    $ fmriprep-docker /path/to/data/dir /path/to/output/dir participant
+    RUNNING: docker run --rm -it -v /path/to/data/dir:/data:ro \
+        -v /home/user/.licenses/freesurfer/license.txt:/opt/freesurfer/license.txt \
+        -v /path/to_output/dir:/out poldracklab/fmriprep:1.0.0 \
+        /data /out participant
+    ...
+
 
 External Dependencies
 =====================
@@ -135,5 +200,5 @@ software tools:
 - ANTs_ (version 2.2.0 - NeuroDocker build)
 - AFNI_ (version Debian-16.2.07)
 - `C3D <https://sourceforge.net/projects/c3d/>`_ (version 1.0.0)
-- FreeSurfer_ (version 6.0.0)
+- FreeSurfer_ (version 6.0.1)
 - `ICA-AROMA <https://github.com/rhr-pruim/ICA-AROMA/>`_ (version 0.4.1-beta)
